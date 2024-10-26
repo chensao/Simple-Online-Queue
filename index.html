@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>简约在线排队器</title>
+    <style>
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        h1, h2 {
+            color: #2c3e50;
+        }
+        .container {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        th {
+            background-color: #f8f8f8;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        input, button {
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        .hidden {
+            display: none;
+        }
+        .skip {
+            color: #e74c3c;
+        }
+        #errorMessage {
+            color: #e74c3c;
+            margin-top: 10px;
+        }
+        .action-buttons {
+            margin-top: 20px;
+        }
+        .action-buttons button {
+            margin-right: 10px;
+        }
+        .leave-button {
+            background-color: #e74c3c;
+        }
+        .leave-button:hover {
+            background-color: #c0392b;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>简约在线排队器</h1>
+        <div id="joinForm">
+            <input type="text" id="username" placeholder="请输入您的用户名">
+            <button id="joinQueue">加入队列</button>
+        </div>
+        <p id="errorMessage"></p>
+        <h2>当前队列状态</h2>
+        <table id="queueTable">
+            <thead>
+                <tr>
+                    <th>位置</th>
+                    <th>用户名</th>
+                    <th>加入时间</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="queueBody">
+            </tbody>
+        </table>
+        <div class="action-buttons">
+            <button id="moveToEndButton" class="hidden">已排到（移至队尾）</button>
+            <button id="skipFirstButton" class="hidden">跳过队首</button>
+            <button id="leaveQueueButton" class="hidden leave-button">退出排队</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fingerprintjs2/2.1.0/fingerprint2.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+
+        const joinForm = document.getElementById('joinForm');
+        const usernameInput = document.getElementById('username');
+        const joinQueueButton = document.getElementById('joinQueue');
+        const queueBody = document.getElementById('queueBody');
+        const errorMessage = document.getElementById('errorMessage');
+        const moveToEndButton = document.getElementById('moveToEndButton');
+        const skipFirstButton = document.getElementById('skipFirstButton');
+        const leaveQueueButton = document.getElementById('leaveQueueButton');
+
+        let fingerprint = '';
+        let lastActivityTime = Date.now();
+        let inactivityTimer;
+
+        Fingerprint2.get(components => {
+            fingerprint = Fingerprint2.x64hash128(components.map(pair => pair.value).join(), 31);
+        });
+
+        function updateActivity() {
+            lastActivityTime = Date.now();
+            socket.emit('updateActivity', fingerprint);
+        }
+
+        function checkInactivity() {
+            const now = Date.now();
+            if (now - lastActivityTime > 30 * 60 * 1000) { // 30 minutes
+                socket.emit('leaveQueue', fingerprint);
+                clearInterval(inactivityTimer);
+            }
+        }
+
+        // 监听用户活动
+        ['mousemove', 'keydown', 'click', 'touchstart'].forEach(eventType => {
+            document.addEventListener(eventType, updateActivity);
+        });
+
+        // 监听页面可见性变化
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                updateActivity();
+            }
+        });
+
+        // 每分钟检查一次不活跃状态
+        inactivityTimer = setInterval(checkInactivity, 60 * 1000);
+
+        joinQueueButton.addEventListener('click', () => {
+            const username = usernameInput.value.trim();
+            if (username) {
+                if ("geolocation" in navigator) {
+                    navigator.geolocation.getCurrentPosition(position => {
+                        socket.emit('joinQueue', {
+                            username,
+                            fingerprint,
+                            latitude: position.coords.latitude,
+                            longitude: position.coords.longitude
+                        });
+                        updateActivity();
+                    }, error => {
+                        errorMessage.textContent = '无法获取位置信息: ' + error.message;
+                    });
+                } else {
+                    errorMessage.textContent = '您的浏览器不支持地理位置功能';
+                }
+            } else {
+                errorMessage.textContent = '请输入用户名';
+            }
+        });
+
+        moveToEndButton.addEventListener('click', () => {
+            socket.emit('moveToEnd', fingerprint);
+            updateActivity();
+        });
+
+        skipFirstButton.addEventListener('click', () => {
+            socket.emit('skipFirst', fingerprint);
+            updateActivity();
+        });
+
+        leaveQueueButton.addEventListener('click', () => {
+            socket.emit('leaveQueue', fingerprint);
+            updateActivity();
+        });
+
+        socket.on('updateQueue', (queue) => {
+            queueBody.innerHTML = '';
+            queue.forEach((user, index) => {
+                const row = queueBody.insertRow();
+                row.insertCell(0).textContent = index + 1;
+                row.insertCell(1).textContent = user.username;
+                row.insertCell(2).textContent = user.joinTime;
+                const statusCell = row.insertCell(3);
+                statusCell.textContent = user.skip ? '已跳过' : '';
+                if (user.skip) statusCell.classList.add('skip');
+                row.insertCell(4).textContent = user.fingerprint === fingerprint ? '您' : '';
+            });
+
+            const isInQueue = queue.some(user => user.fingerprint === fingerprint);
+            joinForm.style.display = isInQueue ? 'none' : 'block';
+            leaveQueueButton.classList.toggle('hidden', !isInQueue);
+
+            moveToEndButton.classList.toggle('hidden', queue.length === 0 || queue[0].fingerprint !== fingerprint);
+            skipFirstButton.classList.toggle('hidden', queue.length <= 1 || queue[1].fingerprint !== fingerprint);
+
+            updateActivity();
+        });
+
+        socket.on('joinError', (message) => {
+            errorMessage.textContent = message;
+        });
+
+        socket.on('moveError', (message) => {
+            errorMessage.textContent = message;
+        });
+
+        socket.on('skipError', (message) => {
+            errorMessage.textContent = message;
+        });
+
+        socket.on('leaveSuccess', (message) => {
+            errorMessage.textContent = message;
+            joinForm.style.display = 'block';
+            leaveQueueButton.classList.add('hidden');
+            clearInterval(inactivityTimer);
+        });
+
+        socket.on('leaveError', (message) => {
+            errorMessage.textContent = message;
+        });
+
+        socket.on('userRemoved', (removedFingerprint, message) => {
+            if (removedFingerprint === fingerprint) {
+                errorMessage.textContent = message;
+                joinForm.style.display = 'block';
+                leaveQueueButton.classList.add('hidden');
+                clearInterval(inactivityTimer);
+            }
+        });
+    </script>
+</body>
+</html>
